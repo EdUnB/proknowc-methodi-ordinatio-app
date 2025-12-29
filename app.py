@@ -14,14 +14,20 @@ import streamlit as st
 
 st.set_page_config(page_title="ProKnow C and Methodi Ordinatio", layout="wide")
 st.title("ProKnow C and Methodi Ordinatio")
-st.caption("Scopus CSV como entrada principal, integração opcional com Scimago SJR, recuperação de ISSN via DOI e etapa manual quando necessário.")
+st.caption(
+    "Scopus CSV como entrada principal, integração opcional com Scimago SJR, "
+    "recuperação de ISSN via DOI e etapa manual quando necessário."
+)
 
 
+# -----------------------------
+# Utilitários
+# -----------------------------
 def normalize_issn(value):
     if value is None or pd.isna(value):
         return ""
     s = str(value).strip()
-    s = re.sub(r"\.0$", "", s)
+    s = re.sub(r"\.0$", "", s)  # remove ".0" típico de float lido do CSV
     digits = re.sub(r"[^0-9Xx]", "", s).upper()
     if digits == "":
         return ""
@@ -38,8 +44,14 @@ def normalize_issn(value):
 def extract_all_issn_norm(value):
     if value is None or pd.isna(value):
         return []
-    blocks = re.findall(r"\d{8}", str(value))
-    out = [f"{b[:4]}-{b[4:]}" for b in blocks]
+    blocks = re.findall(r"\d{7,8}", str(value))
+    out = []
+    for b in blocks:
+        bb = b
+        if len(bb) == 7:
+            bb = "0" + bb
+        if len(bb) == 8:
+            out.append(f"{bb[:4]}-{bb[4:]}")
     seen = []
     for x in out:
         if x not in seen:
@@ -54,6 +66,7 @@ def parse_sjr_float(value):
     s = re.sub(r"[^0-9,\.]", "", s)
     if s == "":
         return pd.NA
+    # Scimago usa vírgula como decimal e pode ter "." como separador de milhar
     s = s.replace(".", "")
     s = s.replace(",", ".")
     return pd.to_numeric(s, errors="coerce")
@@ -63,7 +76,7 @@ def score_issn_series(series):
     s = series.dropna().astype(str).head(2000)
     if len(s) == 0:
         return 0.0
-    ok = s.apply(lambda x: bool(re.search(r"\d{8}", x)))
+    ok = s.apply(lambda x: bool(re.search(r"\d{7,8}", x)))
     return float(ok.mean())
 
 
@@ -79,7 +92,13 @@ def score_sjr_series(series):
     s = series.dropna().astype(str).head(2000)
     if len(s) == 0:
         return 0.0
-    ok = s.apply(lambda x: bool(re.match(r"^\s*\d{1,3}(?:\.\d{3})*,\d+\s*$|^\s*\d+,\d+\s*$", x)))
+
+    def looks_like_sjr(x):
+        xx = str(x).strip()
+        # aceita "145,004" ou "41,754" ou "3,125" etc
+        return bool(re.match(r"^\d{1,3}(?:\.\d{3})*,\d+$|^\d+,\d+$|^\d+(\.\d+)?$", xx))
+
+    ok = s.apply(looks_like_sjr)
     return float(ok.mean())
 
 
@@ -91,6 +110,7 @@ def crossref_fetch_issn_from_doi(doi, contact_email=""):
     ua = "ProKnowC-App/1.0"
     if contact_email.strip() != "":
         ua = f"ProKnowC-App/1.0 (contact: {contact_email.strip()})"
+
     try:
         r = requests.get(url, timeout=20, headers={"User-Agent": ua})
         if r.status_code != 200:
@@ -98,6 +118,7 @@ def crossref_fetch_issn_from_doi(doi, contact_email=""):
         data = r.json()
     except Exception:
         return ""
+
     msg = data.get("message", {}) or {}
     issn_list = msg.get("ISSN", []) or []
     for it in issn_list:
@@ -107,21 +128,48 @@ def crossref_fetch_issn_from_doi(doi, contact_email=""):
     return ""
 
 
+def fig_to_png_bytes(fig, dpi=200):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def safe_journal_label(s):
+    s = str(s)
+    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
+    return s[:80]
+
+
+def make_key(df_like):
+    j = df_like["journal"].fillna("").astype(str).str.strip().str.lower()
+    t = df_like["title"].fillna("").astype(str).str.strip().str.lower()
+    y = pd.to_numeric(df_like["year"], errors="coerce").astype("Int64").astype(str)
+    return j + "||" + t + "||" + y
+
+
+# -----------------------------
+# Leitura dos arquivos
+# -----------------------------
 @st.cache_data(show_spinner=False)
 def read_scopus(scopus_file):
     df_raw = pd.read_csv(scopus_file, dtype=str, keep_default_na=True)
+
     for col in ["Title", "Year", "Source title", "Cited by", "DOI", "ISSN"]:
         if col not in df_raw.columns:
             df_raw[col] = pd.NA
 
-    df = pd.DataFrame({
-        "title": df_raw["Title"].astype("string"),
-        "year": pd.to_numeric(df_raw["Year"], errors="coerce").astype("Int64"),
-        "journal": df_raw["Source title"].astype("string"),
-        "cited_by": pd.to_numeric(df_raw["Cited by"], errors="coerce").fillna(0).astype(int),
-        "doi": df_raw["DOI"].astype("string"),
-        "issn": df_raw["ISSN"].astype("string"),
-    })
+    df = pd.DataFrame(
+        {
+            "title": df_raw["Title"].astype("string"),
+            "year": pd.to_numeric(df_raw["Year"], errors="coerce").astype("Int64"),
+            "journal": df_raw["Source title"].astype("string"),
+            "cited_by": pd.to_numeric(df_raw["Cited by"], errors="coerce").fillna(0).astype(int),
+            "doi": df_raw["DOI"].astype("string"),
+            "issn": df_raw["ISSN"].astype("string"),
+        }
+    )
+
     df["issn_norm"] = df["issn"].apply(normalize_issn)
     df["is_book_chapter"] = False
     return df
@@ -135,7 +183,7 @@ def read_scimago(scimago_file):
         encoding="utf-8-sig",
         dtype=str,
         engine="python",
-        on_bad_lines="skip"
+        on_bad_lines="skip",
     )
 
     cols = list(df_raw.columns)
@@ -149,15 +197,20 @@ def read_scimago(scimago_file):
     quart_scores = [(c, score_quartile_series(df_raw[c])) for c in cols]
     quart_col, quart_score = sorted(quart_scores, key=lambda x: x[1], reverse=True)[0]
 
-    df = pd.DataFrame({
-        "issn_raw": df_raw[issn_col],
-        "sjr": df_raw[sjr_col].apply(parse_sjr_float),
-        "best_quartile": df_raw[quart_col].astype(str).str.strip() if quart_score >= 0.2 else pd.Series([pd.NA] * len(df_raw)),
-    })
+    df = pd.DataFrame(
+        {
+            "issn_raw": df_raw[issn_col],
+            "sjr": df_raw[sjr_col].apply(parse_sjr_float),
+            "best_quartile": df_raw[quart_col].astype(str).str.strip()
+            if quart_score >= 0.2
+            else pd.Series([pd.NA] * len(df_raw)),
+        }
+    )
 
     df["issn_norm"] = df["issn_raw"].apply(extract_all_issn_norm)
     df = df.explode("issn_norm")
     df = df[df["issn_norm"].notna() & (df["issn_norm"] != "")]
+
     df_merge = df[["issn_norm", "sjr", "best_quartile"]].drop_duplicates(subset=["issn_norm"]).copy()
 
     meta = {
@@ -173,25 +226,23 @@ def read_scimago(scimago_file):
     return df_merge, meta
 
 
-def make_key(df):
-    j = df["journal"].fillna("").astype(str).str.strip().str.lower()
-    t = df["title"].fillna("").astype(str).str.strip().str.lower()
-    y = df["year"].astype("Int64").astype(str)
-    return j + "||" + t + "||" + y
-
-
+# -----------------------------
+# Methodi Ordinatio
+# -----------------------------
 def compute_methodi_ordinatio(df_final, Yc, alpha):
-    tabela = pd.DataFrame({
-        "paper_title": df_final["title"].astype("string"),
-        "journal": df_final["journal"].astype("string"),
-        "year": pd.to_numeric(df_final["year"], errors="coerce").astype("Int64"),
-        "citations": pd.to_numeric(df_final["cited_by"], errors="coerce").fillna(0).astype(int),
-        "impact_factor_sjr": pd.to_numeric(df_final["sjr"], errors="coerce"),
-        "sjr_quartile": df_final["best_quartile"].astype("string"),
-        "issn_norm": df_final["issn_norm"].astype("string"),
-        "doi": df_final["doi"].astype("string"),
-        "is_book_chapter": df_final["is_book_chapter"].astype(bool),
-    })
+    tabela = pd.DataFrame(
+        {
+            "paper_title": df_final["title"].astype("string"),
+            "journal": df_final["journal"].astype("string"),
+            "year": pd.to_numeric(df_final["year"], errors="coerce").astype("Int64"),
+            "citations": pd.to_numeric(df_final["cited_by"], errors="coerce").fillna(0).astype(int),
+            "impact_factor_sjr": pd.to_numeric(df_final["sjr"], errors="coerce"),
+            "sjr_quartile": df_final["best_quartile"].astype("string"),
+            "issn_norm": df_final["issn_norm"].astype("string"),
+            "doi": df_final["doi"].astype("string"),
+            "is_book_chapter": df_final["is_book_chapter"].astype(bool),
+        }
+    )
 
     tabela = tabela.dropna(subset=["paper_title", "year"])
     tabela = tabela[tabela["paper_title"].astype(str).str.strip() != ""]
@@ -209,17 +260,10 @@ def compute_methodi_ordinatio(df_final, Yc, alpha):
     tabela.insert(0, "rank", tabela.index + 1)
     return tabela
 
-def fig_to_png_bytes(fig, dpi=200):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-    buf.seek(0)
-    return buf.getvalue()
 
-def safe_journal_label(s):
-    s = str(s)
-    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
-    return s[:80]
-
+# -----------------------------
+# Sidebar
+# -----------------------------
 st.sidebar.header("Arquivos")
 scopus_file = st.sidebar.file_uploader("Scopus CSV", type=["csv"])
 scimago_file = st.sidebar.file_uploader("Scimago CSV", type=["csv"])
@@ -240,6 +284,9 @@ if "state" not in st.session_state:
     st.session_state.state = {}
 
 
+# -----------------------------
+# Rodar etapa automática
+# -----------------------------
 if run_auto:
     if scopus_file is None:
         st.error("Envie o CSV do Scopus.")
@@ -255,7 +302,11 @@ if run_auto:
 
         with st.spinner("Recuperando ISSN via DOI, apenas para casos sem ISSN"):
             df_scopus_enriched = df_scopus.copy()
-            mask = (df_scopus_enriched["issn_norm"] == "") & df_scopus_enriched["doi"].notna() & (df_scopus_enriched["doi"].astype(str).str.strip() != "")
+            mask = (
+                (df_scopus_enriched["issn_norm"] == "")
+                & df_scopus_enriched["doi"].notna()
+                & (df_scopus_enriched["doi"].astype(str).str.strip() != "")
+            )
             idxs = list(df_scopus_enriched.loc[mask].index)
 
             recovered = 0
@@ -274,6 +325,9 @@ if run_auto:
         st.success("Etapa automática concluída.")
 
 
+# -----------------------------
+# Pós etapa automática
+# -----------------------------
 if "df_scopus_enriched" in st.session_state.state:
     df_scopus_enriched = st.session_state.state["df_scopus_enriched"]
     df_sjr_merge = st.session_state.state.get("df_sjr_merge", None)
@@ -295,19 +349,18 @@ if "df_scopus_enriched" in st.session_state.state:
     st.dataframe(missing, use_container_width=True, height=220)
 
     st.subheader("Etapa manual de ISSN")
-    st.write("Baixe o modelo, preencha issn_norm_manual no formato ####-####. Para capítulo de livro, use notes com BOOK_CHAPTER.")
+    st.write(
+        "Baixe o modelo e preencha ISSN_PREENCHER_AQUI no formato ####-####. "
+        "Se for capítulo de livro, escreva BOOK_CHAPTER em TIPO_ITEM."
+    )
 
     manual = missing.copy()
-
-    # Coluna principal para o usuário preencher
     manual["ISSN_PREENCHER_AQUI"] = ""
-
-    # Ajuda visual
     manual["FORMATO_ESPERADO"] = "####-####"
     manual["EXEMPLO"] = "0360-5442"
-    manual["INSTRUCAO"] = "Preencha ISSN_PREENCHER_AQUI. Se for capitulo de livro, escreva BOOK_CHAPTER em TIPO_ITEM."
-
-    # Campo para marcar excecoes
+    manual["INSTRUCAO"] = (
+        "Preencha ISSN_PREENCHER_AQUI. Se for capitulo de livro, escreva BOOK_CHAPTER em TIPO_ITEM."
+    )
     manual["TIPO_ITEM"] = ""
 
     xlsx_buf = io.BytesIO()
@@ -326,6 +379,7 @@ if "df_scopus_enriched" in st.session_state.state:
     if filled is not None:
         manual_filled = pd.read_excel(filled, dtype=str)
         needed = {"journal", "title", "year", "doi", "ISSN_PREENCHER_AQUI", "TIPO_ITEM"}
+
         if not needed.issubset(set(manual_filled.columns)):
             st.error("Modelo não contém todas as colunas necessárias.")
         else:
@@ -333,21 +387,31 @@ if "df_scopus_enriched" in st.session_state.state:
             manual_filled["ISSN_PREENCHER_AQUI"] = manual_filled["ISSN_PREENCHER_AQUI"].apply(normalize_issn)
             manual_filled["TIPO_ITEM"] = manual_filled["TIPO_ITEM"].fillna("").astype(str).str.strip().str.upper()
 
+            manual_filled["match_key"] = make_key(manual_filled)
+
+            df_updated = df_scopus_enriched.copy()
+            df_updated["match_key"] = make_key(df_updated)
+
             issn_map = dict(zip(manual_filled["match_key"], manual_filled["ISSN_PREENCHER_AQUI"]))
             tipo_map = dict(zip(manual_filled["match_key"], manual_filled["TIPO_ITEM"]))
-            
+
             df_updated["issn_norm_manual"] = df_updated["match_key"].map(issn_map).fillna("")
             df_updated["manual_tipo_item"] = df_updated["match_key"].map(tipo_map).fillna("")
-            
+
             mask_apply = (df_updated["issn_norm"] == "") & (df_updated["issn_norm_manual"] != "")
             df_updated.loc[mask_apply, "issn_norm"] = df_updated.loc[mask_apply, "issn_norm_manual"]
-            
+
             df_updated["is_book_chapter"] = df_updated["manual_tipo_item"].str.contains("BOOK_CHAPTER", na=False)
+
+            df_updated = df_updated.drop(columns=["match_key"])
 
             st.session_state.state["df_scopus_enriched"] = df_updated
             st.success(f"ISSN aplicados manualmente: {int(mask_apply.sum())}")
 
 
+# -----------------------------
+# Calcular resultados finais
+# -----------------------------
 if compute_final:
     if "df_scopus_enriched" not in st.session_state.state:
         st.error("Rode a etapa automática primeiro.")
@@ -374,6 +438,9 @@ if compute_final:
         st.success("Resultados calculados.")
 
 
+# -----------------------------
+# Resultados, gráficos e downloads
+# -----------------------------
 if "tabela" in st.session_state.state:
     tabela = st.session_state.state["tabela"]
     df_final = st.session_state.state["df_final"]
@@ -381,111 +448,96 @@ if "tabela" in st.session_state.state:
     st.subheader("Tabela ranqueada")
     st.dataframe(tabela, use_container_width=True, height=420)
 
-   st.subheader("Gráficos e exportação")
+    st.subheader("Gráficos e exportação")
 
     # B1.1 Publicações por ano
     st.markdown("### B1.1 Publicações por ano")
-    by_year = (
-        tabela.groupby("year", dropna=True)
-        .size()
-        .reset_index(name="count")
-        .sort_values("year")
-    )
+    by_year = tabela.groupby("year", dropna=True).size().reset_index(name="count").sort_values("year")
     fig1, ax1 = plt.subplots()
     ax1.bar(by_year["year"].astype(int), by_year["count"].astype(int))
     ax1.set_xlabel("Year")
     ax1.set_ylabel("Number of publications")
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
     st.pyplot(fig1, clear_figure=True)
-    png1 = fig_to_png_bytes(fig1)
     st.download_button(
         "Download PNG (B1.1)",
-        data=png1,
+        data=fig_to_png_bytes(fig1),
         file_name="B1_1_publications_by_year.png",
         mime="image/png",
     )
-    
+
     # B1.2 Top periódicos por número de artigos
     st.markdown("### B1.2 Top periódicos por número de artigos")
     top_n = st.slider("Top N periódicos", min_value=5, max_value=30, value=15, step=1)
-    by_j = (
-        tabela["journal"].fillna("Unknown")
-        .astype(str)
-        .value_counts()
-        .head(top_n)
-        .reset_index()
-    )
+    by_j = tabela["journal"].fillna("Unknown").astype(str).value_counts().head(top_n).reset_index()
     by_j.columns = ["journal", "count"]
     by_j = by_j.sort_values("count", ascending=True)
-    
+
     fig2, ax2 = plt.subplots()
     ax2.barh(by_j["journal"], by_j["count"].astype(int))
     ax2.set_xlabel("Number of publications")
     ax2.set_ylabel("Journal")
     st.pyplot(fig2, clear_figure=True)
-    png2 = fig_to_png_bytes(fig2)
     st.download_button(
         "Download PNG (B1.2)",
-        data=png2,
+        data=fig_to_png_bytes(fig2),
         file_name=f"B1_2_top_{top_n}_journals.png",
         mime="image/png",
     )
-    
+
     # B1.3 Distribuição do InOrdinatio
     st.markdown("### B1.3 Distribuição do InOrdinatio")
     bins = st.slider("Número de bins", min_value=5, max_value=80, value=30, step=1)
-    
     ord_vals = pd.to_numeric(tabela["inordinatio"], errors="coerce").dropna()
+
     fig3, ax3 = plt.subplots()
     ax3.hist(ord_vals.values, bins=int(bins))
     ax3.set_xlabel("InOrdinatio")
     ax3.set_ylabel("Frequency")
     st.pyplot(fig3, clear_figure=True)
-    png3 = fig_to_png_bytes(fig3)
     st.download_button(
         "Download PNG (B1.3)",
-        data=png3,
+        data=fig_to_png_bytes(fig3),
         file_name=f"B1_3_inordinatio_distribution_bins_{bins}.png",
         mime="image/png",
     )
-    
-    # Complementares rápidos, exportáveis também
+
+    # Complementares
     st.markdown("### Complementares")
-    
+
     st.markdown("#### Top 15 por citações")
     top_cit = tabela.sort_values("citations", ascending=False).head(15)[["paper_title", "citations"]].copy()
     top_cit["paper_title"] = top_cit["paper_title"].astype(str).str.slice(0, 80)
-    
+
     fig4, ax4 = plt.subplots()
     ax4.barh(top_cit["paper_title"][::-1], top_cit["citations"][::-1].astype(int))
     ax4.set_xlabel("Citations")
     ax4.set_ylabel("Paper title")
     st.pyplot(fig4, clear_figure=True)
-    png4 = fig_to_png_bytes(fig4)
     st.download_button(
         "Download PNG (Top citations)",
-        data=png4,
+        data=fig_to_png_bytes(fig4),
         file_name="top_15_citations.png",
         mime="image/png",
     )
-    
+
     st.markdown("#### Top 15 por InOrdinatio")
     top_ord = tabela.sort_values("inordinatio", ascending=False).head(15)[["paper_title", "inordinatio"]].copy()
     top_ord["paper_title"] = top_ord["paper_title"].astype(str).str.slice(0, 80)
-    
+
     fig5, ax5 = plt.subplots()
     ax5.barh(top_ord["paper_title"][::-1], pd.to_numeric(top_ord["inordinatio"], errors="coerce")[::-1])
     ax5.set_xlabel("InOrdinatio")
     ax5.set_ylabel("Paper title")
     st.pyplot(fig5, clear_figure=True)
-    png5 = fig_to_png_bytes(fig5)
     st.download_button(
         "Download PNG (Top InOrdinatio)",
-        data=png5,
+        data=fig_to_png_bytes(fig5),
         file_name="top_15_inordinatio.png",
         mime="image/png",
     )
 
+    # Downloads finais
     st.subheader("Downloads")
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
 
@@ -508,17 +560,18 @@ if "tabela" in st.session_state.state:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    # Diagnóstico
     st.subheader("Diagnóstico")
     total = int(len(df_final))
     with_sjr = int(df_final["sjr"].notna().sum())
     without_sjr = int(df_final["sjr"].isna().sum())
     book_chapter = int(df_final["is_book_chapter"].sum())
 
-    st.write({
-        "total_itens": total,
-        "com_sjr": with_sjr,
-        "sem_sjr": without_sjr,
-        "book_chapter": book_chapter,
-    })
-
-
+    st.write(
+        {
+            "total_itens": total,
+            "com_sjr": with_sjr,
+            "sem_sjr": without_sjr,
+            "book_chapter": book_chapter,
+        }
+    )
