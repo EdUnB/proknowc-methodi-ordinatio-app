@@ -285,8 +285,17 @@ if "df_scopus_enriched" in st.session_state.state:
     st.write("Baixe o modelo, preencha issn_norm_manual no formato ####-####. Para capítulo de livro, use notes com BOOK_CHAPTER.")
 
     manual = missing.copy()
-    manual["issn_norm_manual"] = ""
-    manual["notes"] = ""
+
+    # Coluna principal para o usuário preencher
+    manual["ISSN_PREENCHER_AQUI"] = ""
+
+    # Ajuda visual
+    manual["FORMATO_ESPERADO"] = "####-####"
+    manual["EXEMPLO"] = "0360-5442"
+    manual["INSTRUCAO"] = "Preencha ISSN_PREENCHER_AQUI. Se for capitulo de livro, escreva BOOK_CHAPTER em TIPO_ITEM."
+
+    # Campo para marcar excecoes
+    manual["TIPO_ITEM"] = ""
 
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
@@ -303,28 +312,24 @@ if "df_scopus_enriched" in st.session_state.state:
 
     if filled is not None:
         manual_filled = pd.read_excel(filled, dtype=str)
-        needed = {"journal", "title", "year", "doi", "issn_norm_manual", "notes"}
+        needed = {"journal", "title", "year", "doi", "ISSN_PREENCHER_AQUI", "TIPO_ITEM"}
         if not needed.issubset(set(manual_filled.columns)):
             st.error("Modelo não contém todas as colunas necessárias.")
         else:
             manual_filled["year"] = pd.to_numeric(manual_filled["year"], errors="coerce").astype("Int64")
-            manual_filled["issn_norm_manual"] = manual_filled["issn_norm_manual"].apply(normalize_issn)
-            manual_filled["notes"] = manual_filled["notes"].fillna("").astype(str).str.strip().str.upper()
+            manual_filled["ISSN_PREENCHER_AQUI"] = manual_filled["ISSN_PREENCHER_AQUI"].apply(normalize_issn)
+            manual_filled["TIPO_ITEM"] = manual_filled["TIPO_ITEM"].fillna("").astype(str).str.strip().str.upper()
 
-            df_updated = df_scopus_enriched.copy()
-            df_updated["match_key"] = make_key(df_updated)
-            manual_filled["match_key"] = make_key(manual_filled)
-
-            issn_map = dict(zip(manual_filled["match_key"], manual_filled["issn_norm_manual"]))
-            notes_map = dict(zip(manual_filled["match_key"], manual_filled["notes"]))
-
+            issn_map = dict(zip(manual_filled["match_key"], manual_filled["ISSN_PREENCHER_AQUI"]))
+            tipo_map = dict(zip(manual_filled["match_key"], manual_filled["TIPO_ITEM"]))
+            
             df_updated["issn_norm_manual"] = df_updated["match_key"].map(issn_map).fillna("")
-            df_updated["manual_notes"] = df_updated["match_key"].map(notes_map).fillna("")
-
+            df_updated["manual_tipo_item"] = df_updated["match_key"].map(tipo_map).fillna("")
+            
             mask_apply = (df_updated["issn_norm"] == "") & (df_updated["issn_norm_manual"] != "")
             df_updated.loc[mask_apply, "issn_norm"] = df_updated.loc[mask_apply, "issn_norm_manual"]
-
-            df_updated["is_book_chapter"] = df_updated["manual_notes"].str.contains("BOOK_CHAPTER", na=False)
+            
+            df_updated["is_book_chapter"] = df_updated["manual_tipo_item"].str.contains("BOOK_CHAPTER", na=False)
 
             st.session_state.state["df_scopus_enriched"] = df_updated
             st.success(f"ISSN aplicados manualmente: {int(mask_apply.sum())}")
@@ -419,3 +424,4 @@ if "tabela" in st.session_state.state:
         "sem_sjr": without_sjr,
         "book_chapter": book_chapter,
     })
+
