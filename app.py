@@ -3,6 +3,9 @@ import time
 import io
 from datetime import datetime
 
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+
 import numpy as np
 import pandas as pd
 import requests
@@ -206,6 +209,16 @@ def compute_methodi_ordinatio(df_final, Yc, alpha):
     tabela.insert(0, "rank", tabela.index + 1)
     return tabela
 
+def fig_to_png_bytes(fig, dpi=200):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    buf.seek(0)
+    return buf.getvalue()
+
+def safe_journal_label(s):
+    s = str(s)
+    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
+    return s[:80]
 
 st.sidebar.header("Arquivos")
 scopus_file = st.sidebar.file_uploader("Scopus CSV", type=["csv"])
@@ -368,27 +381,110 @@ if "tabela" in st.session_state.state:
     st.subheader("Tabela ranqueada")
     st.dataframe(tabela, use_container_width=True, height=420)
 
-    st.subheader("Gráficos")
-    c1, c2 = st.columns(2)
+   st.subheader("Gráficos e exportação")
 
-    with c1:
-        st.write("Publicações por ano")
-        by_year = tabela.groupby("year").size().reset_index(name="count").sort_values("year")
-        st.bar_chart(by_year.set_index("year"))
-
-    with c2:
-        st.write("Top periódicos por quantidade de artigos")
-        by_j = tabela["journal"].fillna("Unknown").value_counts().head(15).reset_index()
-        by_j.columns = ["journal", "count"]
-        st.bar_chart(by_j.set_index("journal"))
-
-    st.write("Top 15 por citações")
-    top_cit = tabela.sort_values("citations", ascending=False).head(15)[["paper_title", "citations"]].set_index("paper_title")
-    st.bar_chart(top_cit)
-
-    st.write("Top 15 por InOrdinatio")
-    top_ord = tabela.sort_values("inordinatio", ascending=False).head(15)[["paper_title", "inordinatio"]].set_index("paper_title")
-    st.bar_chart(top_ord)
+    # B1.1 Publicações por ano
+    st.markdown("### B1.1 Publicações por ano")
+    by_year = (
+        tabela.groupby("year", dropna=True)
+        .size()
+        .reset_index(name="count")
+        .sort_values("year")
+    )
+    fig1, ax1 = plt.subplots()
+    ax1.bar(by_year["year"].astype(int), by_year["count"].astype(int))
+    ax1.set_xlabel("Year")
+    ax1.set_ylabel("Number of publications")
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    st.pyplot(fig1, clear_figure=True)
+    png1 = fig_to_png_bytes(fig1)
+    st.download_button(
+        "Download PNG (B1.1)",
+        data=png1,
+        file_name="B1_1_publications_by_year.png",
+        mime="image/png",
+    )
+    
+    # B1.2 Top periódicos por número de artigos
+    st.markdown("### B1.2 Top periódicos por número de artigos")
+    top_n = st.slider("Top N periódicos", min_value=5, max_value=30, value=15, step=1)
+    by_j = (
+        tabela["journal"].fillna("Unknown")
+        .astype(str)
+        .value_counts()
+        .head(top_n)
+        .reset_index()
+    )
+    by_j.columns = ["journal", "count"]
+    by_j = by_j.sort_values("count", ascending=True)
+    
+    fig2, ax2 = plt.subplots()
+    ax2.barh(by_j["journal"], by_j["count"].astype(int))
+    ax2.set_xlabel("Number of publications")
+    ax2.set_ylabel("Journal")
+    st.pyplot(fig2, clear_figure=True)
+    png2 = fig_to_png_bytes(fig2)
+    st.download_button(
+        "Download PNG (B1.2)",
+        data=png2,
+        file_name=f"B1_2_top_{top_n}_journals.png",
+        mime="image/png",
+    )
+    
+    # B1.3 Distribuição do InOrdinatio
+    st.markdown("### B1.3 Distribuição do InOrdinatio")
+    bins = st.slider("Número de bins", min_value=5, max_value=80, value=30, step=1)
+    
+    ord_vals = pd.to_numeric(tabela["inordinatio"], errors="coerce").dropna()
+    fig3, ax3 = plt.subplots()
+    ax3.hist(ord_vals.values, bins=int(bins))
+    ax3.set_xlabel("InOrdinatio")
+    ax3.set_ylabel("Frequency")
+    st.pyplot(fig3, clear_figure=True)
+    png3 = fig_to_png_bytes(fig3)
+    st.download_button(
+        "Download PNG (B1.3)",
+        data=png3,
+        file_name=f"B1_3_inordinatio_distribution_bins_{bins}.png",
+        mime="image/png",
+    )
+    
+    # Complementares rápidos, exportáveis também
+    st.markdown("### Complementares")
+    
+    st.markdown("#### Top 15 por citações")
+    top_cit = tabela.sort_values("citations", ascending=False).head(15)[["paper_title", "citations"]].copy()
+    top_cit["paper_title"] = top_cit["paper_title"].astype(str).str.slice(0, 80)
+    
+    fig4, ax4 = plt.subplots()
+    ax4.barh(top_cit["paper_title"][::-1], top_cit["citations"][::-1].astype(int))
+    ax4.set_xlabel("Citations")
+    ax4.set_ylabel("Paper title")
+    st.pyplot(fig4, clear_figure=True)
+    png4 = fig_to_png_bytes(fig4)
+    st.download_button(
+        "Download PNG (Top citations)",
+        data=png4,
+        file_name="top_15_citations.png",
+        mime="image/png",
+    )
+    
+    st.markdown("#### Top 15 por InOrdinatio")
+    top_ord = tabela.sort_values("inordinatio", ascending=False).head(15)[["paper_title", "inordinatio"]].copy()
+    top_ord["paper_title"] = top_ord["paper_title"].astype(str).str.slice(0, 80)
+    
+    fig5, ax5 = plt.subplots()
+    ax5.barh(top_ord["paper_title"][::-1], pd.to_numeric(top_ord["inordinatio"], errors="coerce")[::-1])
+    ax5.set_xlabel("InOrdinatio")
+    ax5.set_ylabel("Paper title")
+    st.pyplot(fig5, clear_figure=True)
+    png5 = fig_to_png_bytes(fig5)
+    st.download_button(
+        "Download PNG (Top InOrdinatio)",
+        data=png5,
+        file_name="top_15_inordinatio.png",
+        mime="image/png",
+    )
 
     st.subheader("Downloads")
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -424,4 +520,5 @@ if "tabela" in st.session_state.state:
         "sem_sjr": without_sjr,
         "book_chapter": book_chapter,
     })
+
 
